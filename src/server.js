@@ -151,6 +151,9 @@ async function waitForGatewayReady(opts = {}) {
   const timeoutMs = opts.timeoutMs ?? 20_000;
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
+    // Give up immediately if the gateway process already exited (e.g. it lost the
+    // state-directory lease) instead of polling a dead port for the full timeout.
+    if (opts.abortIf?.()) return false;
     try {
       // Try the default Control UI base path, then fall back to root.
       const paths = ["/openclaw", "/"];
@@ -244,7 +247,7 @@ async function ensureGatewayRunning() {
       try {
         lastGatewayError = null;
         await startGateway();
-        let ready = await waitForGatewayReady({ timeoutMs: 35_000 });
+        let ready = await waitForGatewayReady({ timeoutMs: 35_000, abortIf: () => !gatewayProc });
         if (!ready) {
           // Retry once with --force: the most common cause here is a stale
           // "Another Gateway owner lease" left by a container Railway already
@@ -255,7 +258,7 @@ async function ensureGatewayRunning() {
             gatewayProc = null;
           }
           await startGateway({ force: true });
-          ready = await waitForGatewayReady({ timeoutMs: 35_000 });
+          ready = await waitForGatewayReady({ timeoutMs: 35_000, abortIf: () => !gatewayProc });
         }
         if (!ready) {
           throw new Error("Gateway did not become ready in time");
@@ -1644,9 +1647,37 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       console.log("[wrapper] gateway ready");
     } catch (err) {
       console.error(`[wrapper] gateway failed to start at boot: ${String(err)}`);
+      retryGatewayStartInBackground();
     }
   }
 });
+
+// After a redeploy the previous container's gateway can still hold the state-directory
+// lease (it's killed before it can release it, and a different host can't be verified
+// dead), so a start attempt fails until that lease expires (up to ~5 minutes). Keep
+// trying quietly instead of leaving the gateway down until someone visits the site.
+let gatewayRetryTimer = null;
+function retryGatewayStartInBackground() {
+  if (gatewayRetryTimer) return;
+  const deadline = Date.now() + 8 * 60 * 1000;
+  const attempt = async () => {
+    gatewayRetryTimer = null;
+    if (gatewayProc || !isConfigured()) return;
+    try {
+      await ensureGatewayRunning();
+      console.log("[wrapper] gateway ready (after background retry)");
+    } catch {
+      if (Date.now() < deadline) {
+        gatewayRetryTimer = setTimeout(attempt, 15_000);
+        gatewayRetryTimer.unref?.();
+      } else {
+        console.error("[wrapper] giving up on background gateway retries");
+      }
+    }
+  };
+  gatewayRetryTimer = setTimeout(attempt, 15_000);
+  gatewayRetryTimer.unref?.();
+}
 
 server.on("upgrade", async (req, socket, head) => {
   // Note: browsers cannot attach arbitrary HTTP headers (including Authorization: Basic)
@@ -1668,19 +1699,22 @@ server.on("upgrade", async (req, socket, head) => {
 });
 
 process.on("SIGTERM", () => {
-  // Best-effort shutdown
+  // Let the gateway exit cleanly so it releases its state-directory lease. Exiting
+  // (and being killed) first leaves the lease held, which blocks the next container
+  // from starting a gateway for several minutes.
+  const gw = gatewayProc;
+  const gatewayExited = gw
+    ? new Promise((resolve) => {
+        gw.once("exit", resolve);
+        try { gw.kill("SIGTERM"); } catch { resolve(); }
+      })
+    : Promise.resolve();
+
   try {
-    if (gatewayProc) gatewayProc.kill("SIGTERM");
+    server.close();
   } catch {
     // ignore
   }
 
-  // Stop accepting new connections; allow in-flight requests to complete briefly.
-  try {
-    server.close(() => process.exit(0));
-  } catch {
-    process.exit(0);
-  }
-
-  setTimeout(() => process.exit(0), 5_000).unref?.();
+  Promise.race([gatewayExited, sleep(25_000)]).then(() => process.exit(0));
 });

@@ -6,6 +6,11 @@ healthcheckPath = "/setup/healthz"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
 
+# Time between SIGTERM and SIGKILL on redeploy. The gateway needs a few seconds to
+# shut down cleanly and release its state-directory lease; without this the next
+# container can be blocked from starting a gateway for ~5 minutes.
+drainingSeconds = 30
+
 # Require a persistent volume mounted at /data (Railway).
 requiredMountPath = "/data"
 
