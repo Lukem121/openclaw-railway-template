@@ -1492,6 +1492,18 @@ function requireDashboardAuth(req, res, next) {
   if (!SETUP_PASSWORD) return next(); // no password configured → open
   const header = req.headers.authorization || "";
   const [scheme, encoded] = header.split(" ");
+
+  // Newer Control UI builds make background requests carrying their own
+  // "Authorization: Bearer <gateway token>". A browser can't answer a Basic
+  // challenge for those (the header is already set), so rejecting them made the
+  // login popup reappear forever. The gateway token is the gateway's own secret,
+  // so accept it here and let the gateway validate it as usual.
+  if (scheme === "Bearer" && encoded && OPENCLAW_GATEWAY_TOKEN) {
+    const a = Buffer.from(encoded);
+    const b = Buffer.from(OPENCLAW_GATEWAY_TOKEN);
+    if (a.length === b.length && crypto.timingSafeEqual(a, b)) return next();
+  }
+
   if (scheme !== "Basic" || !encoded) {
     res.set("WWW-Authenticate", 'Basic realm="OpenClaw Dashboard"');
     return res.status(401).send("Auth required");
