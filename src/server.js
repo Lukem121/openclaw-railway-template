@@ -259,13 +259,17 @@ async function ensureGatewayRunning() {
 
 async function restartGateway() {
   if (gatewayProc) {
+    const dying = gatewayProc;
+    const exited = new Promise((resolve) => dying.once("exit", resolve));
     try {
-      gatewayProc.kill("SIGTERM");
+      dying.kill("SIGTERM");
     } catch {
       // ignore
     }
-    // Give it a moment to exit and release the port.
-    await sleep(750);
+    // Wait for the old process to actually exit (and release its state-directory
+    // lease) rather than guessing a fixed delay: starting a new gateway before the
+    // old one lets go fails with "Another Gateway owner lease is still active."
+    await Promise.race([exited, sleep(8_000)]);
     gatewayProc = null;
   }
   return ensureGatewayRunning();
