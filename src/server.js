@@ -1106,6 +1106,18 @@ function extractDeviceRequestIds(text) {
   for (const m of s.matchAll(/requestId\s*(?:=|:)\s*([A-Za-z0-9_-]{6,})/g)) out.add(m[1]);
   for (const m of s.matchAll(/"requestId"\s*:\s*"([A-Za-z0-9_-]{6,})"/g)) out.add(m[1]);
 
+  // Newer OpenClaw prints a "Pending (n)" table whose first column is the request
+  // UUID. Only read the Pending section so already-paired device IDs aren't offered.
+  const pendingStart = s.search(/^\s*Pending\b/m);
+  if (pendingStart !== -1) {
+    const rest = s.slice(pendingStart);
+    const pairedAt = rest.search(/^\s*Paired\b/m);
+    const pending = pairedAt === -1 ? rest : rest.slice(0, pairedAt);
+    for (const m of pending.matchAll(/\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)) {
+      out.add(m[1]);
+    }
+  }
+
   return Array.from(out);
 }
 
