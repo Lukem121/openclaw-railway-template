@@ -1526,7 +1526,13 @@ function requireDashboardAuth(req, res, next) {
 // cannot set custom Authorization headers for WebSocket connections, so we inject
 // the token into proxied requests at the wrapper level.
 function attachGatewayAuthHeader(req) {
-  if (!req?.headers?.authorization && OPENCLAW_GATEWAY_TOKEN) {
+  if (!OPENCLAW_GATEWAY_TOKEN) return;
+  const existing = req?.headers?.authorization;
+  // A Basic header here is the browser's dashboard password (already checked by the
+  // wrapper). The gateway doesn't understand it and answers 401, which the browser
+  // then surfaces as a login popup for every gateway-served file/API. Swap in the
+  // gateway token instead. A Bearer header (the Control UI's own token) is left alone.
+  if (!existing || /^Basic\s/i.test(existing)) {
     req.headers.authorization = `Bearer ${OPENCLAW_GATEWAY_TOKEN}`;
   }
 }
