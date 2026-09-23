@@ -467,8 +467,13 @@ app.get("/setup", requireSetupAuth, (_req, res) => {
         <a href="/openclaw" target="_blank">Open OpenClaw UI →</a>
         <a href="/setup/export" target="_blank">Download backup (.tar.gz)</a>
       </div>
-      <div class="callout">
-        <strong>First time opening the UI?</strong> Your browser needs a one-time approval. If you see "Approve this browser", come back here, open <strong>Approve this browser's access</strong> below, and click Refresh.
+      <div id="gatewayTokenBox" class="callout" style="display:none">
+        <strong>First time opening the UI?</strong> It'll ask for a "Gateway secret" — paste this:
+        <div class="actions" style="margin-top:0.5rem">
+          <code id="gatewayTokenValue" style="padding:0.4rem 0.6rem; font-size:0.85rem; user-select:all"></code>
+          <button id="gatewayTokenCopy" type="button" class="btn-secondary" style="padding:0.4rem 0.7rem">Copy</button>
+        </div>
+        <div style="margin-top:0.5rem">After that, it may also ask to approve this browser — see <strong>Approve this browser's access</strong> below.</div>
       </div>
     </div>
 
@@ -679,6 +684,10 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
     openclawVersion: version.output.trim(),
     channelsAddHelp: channelsHelp.output,
     authGroups: AUTH_GROUPS,
+    // Shown on /setup so the operator can paste it into the Control UI's
+    // "Gateway secret" prompt without needing SSH. This page is already gated
+    // by SETUP_PASSWORD, same trust boundary as the config editor below.
+    gatewayToken: OPENCLAW_GATEWAY_TOKEN || null,
   });
 });
 

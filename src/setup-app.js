@@ -8,6 +8,26 @@
   var authChoiceEl = document.getElementById('authChoice');
   var logEl = document.getElementById('log');
 
+  // Gateway secret helper (for the Control UI's "Gateway secret" prompt)
+  var gatewayTokenBoxEl = document.getElementById('gatewayTokenBox');
+  var gatewayTokenValueEl = document.getElementById('gatewayTokenValue');
+  var gatewayTokenCopyEl = document.getElementById('gatewayTokenCopy');
+  if (gatewayTokenCopyEl) {
+    gatewayTokenCopyEl.onclick = function () {
+      var text = gatewayTokenValueEl ? gatewayTokenValueEl.textContent : '';
+      if (!text) return;
+      var done = function () {
+        gatewayTokenCopyEl.textContent = 'Copied!';
+        setTimeout(function () { gatewayTokenCopyEl.textContent = 'Copy'; }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, done);
+      } else {
+        done();
+      }
+    };
+  }
+
   // Debug console
   var consoleCmdEl = document.getElementById('consoleCmd');
   var consoleArgEl = document.getElementById('consoleArg');
@@ -117,6 +137,15 @@
         parts.push('Gateway target: ' + (j.gatewayTarget || '(unknown)'));
         parts.push('Tip: /healthz shows wrapper+gateway reachability.');
         statusDetailsEl.textContent = parts.join('\n');
+      }
+
+      if (gatewayTokenBoxEl && gatewayTokenValueEl) {
+        if (j.configured && j.gatewayToken) {
+          gatewayTokenValueEl.textContent = j.gatewayToken;
+          gatewayTokenBoxEl.style.display = '';
+        } else {
+          gatewayTokenBoxEl.style.display = 'none';
+        }
       }
 
       // If channels are unsupported, surface it for debugging.
