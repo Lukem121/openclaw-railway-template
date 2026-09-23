@@ -238,7 +238,7 @@ async function ensureGatewayRunning() {
       try {
         lastGatewayError = null;
         await startGateway();
-        const ready = await waitForGatewayReady({ timeoutMs: 20_000 });
+        const ready = await waitForGatewayReady({ timeoutMs: 35_000 });
         if (!ready) {
           throw new Error("Gateway did not become ready in time");
         }
@@ -808,11 +808,11 @@ function runCmd(cmd, args, opts = {}) {
 }
 
 app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
+  const respondJson = (status, body) => {
+    if (res.writableEnded || res.headersSent) return;
+    res.status(status).json(body);
+  };
   try {
-    const respondJson = (status, body) => {
-      if (res.writableEnded || res.headersSent) return;
-      res.status(status).json(body);
-    };
     if (isConfigured()) {
       await ensureGatewayRunning();
       return respondJson(200, {
