@@ -171,7 +171,7 @@ async function waitForGatewayReady(opts = {}) {
   return false;
 }
 
-async function startGateway() {
+async function startGateway(opts = {}) {
   if (gatewayProc) return;
   if (!isConfigured()) throw new Error("Gateway cannot start: not configured");
 
@@ -190,6 +190,12 @@ async function startGateway() {
     "--token",
     OPENCLAW_GATEWAY_TOKEN,
   ];
+
+  // Railway can replace a container (redeploy, crash, host maintenance) faster than
+  // the old gateway process can release its state-directory lease, leaving a stale
+  // "Another Gateway owner lease is still active" error that a plain restart never
+  // clears on its own. --force clears a stale listener/lease before starting.
+  if (opts.force) args.push("--force");
 
   gatewayProc = childProcess.spawn(OPENCLAW_NODE, clawArgs(args), {
     stdio: "inherit",
@@ -238,7 +244,19 @@ async function ensureGatewayRunning() {
       try {
         lastGatewayError = null;
         await startGateway();
-        const ready = await waitForGatewayReady({ timeoutMs: 35_000 });
+        let ready = await waitForGatewayReady({ timeoutMs: 35_000 });
+        if (!ready) {
+          // Retry once with --force: the most common cause here is a stale
+          // "Another Gateway owner lease" left by a container Railway already
+          // replaced, which a plain retry can never clear on its own.
+          console.warn("[gateway] not ready; retrying once with --force");
+          if (gatewayProc) {
+            try { gatewayProc.kill("SIGKILL"); } catch {}
+            gatewayProc = null;
+          }
+          await startGateway({ force: true });
+          ready = await waitForGatewayReady({ timeoutMs: 35_000 });
+        }
         if (!ready) {
           throw new Error("Gateway did not become ready in time");
         }
