@@ -484,17 +484,17 @@ app.get("/setup", requireSetupAuth, (_req, res) => {
       <h2>Status</h2>
       <div id="status" class="status-line">Loading...</div>
       <div id="statusDetails" class="hint" style="margin-top:0.35rem; margin-bottom:0"></div>
-      <div class="links">
-        <a href="/openclaw" target="_blank">Open OpenClaw UI →</a>
-        <a href="/setup/export" target="_blank">Download backup (.tar.gz)</a>
+      <div class="actions" style="margin-top:0.9rem">
+        <a href="/setup/open" target="_blank" class="btn-primary" style="text-decoration:none; padding:0.7rem 1.1rem; border-radius:8px; font-weight:600">Open OpenClaw →</a>
+        <a href="/setup/export" target="_blank" style="font-size:0.92rem">Download backup (.tar.gz)</a>
       </div>
       <div id="gatewayTokenBox" class="callout" style="display:none">
-        <strong>First time opening the UI?</strong> It'll ask for a "Gateway secret" — paste this:
+        <strong>Signing in on another device?</strong> Use Open OpenClaw above. If a browser ever asks for a "Gateway secret", paste this:
         <div class="actions" style="margin-top:0.5rem">
           <code id="gatewayTokenValue" style="padding:0.4rem 0.6rem; font-size:0.85rem; user-select:all"></code>
           <button id="gatewayTokenCopy" type="button" class="btn-secondary" style="padding:0.4rem 0.7rem">Copy</button>
         </div>
-        <div style="margin-top:0.5rem">After that, it may also ask to approve this browser — see <strong>Approve this browser's access</strong> below.</div>
+        <div style="margin-top:0.5rem">It may then ask to approve the browser — see <strong>Approve this browser's access</strong> below.</div>
       </div>
     </div>
 
@@ -1328,6 +1328,43 @@ app.post("/setup/api/reset", requireSetupAuth, async (_req, res) => {
   }
 });
 
+// One-click sign-in to the Control UI. `openclaw dashboard` mints a single-use
+// bootstrap link that authenticates and pairs the browser as owner, so there's no
+// token to paste and no separate device approval. The secret lives in the URL
+// fragment, which browsers never send to a server.
+app.get("/setup/open", requireSetupAuth, async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (!isConfigured()) return res.redirect("/setup");
+
+  try {
+    await ensureGatewayRunning();
+  } catch (err) {
+    return res.status(503).type("text/plain").send(`Gateway not ready yet: ${String(err)}\nTry again in a minute.`);
+  }
+
+  const r = await runCmd(OPENCLAW_NODE, clawArgs(["dashboard", "--no-open", "--json"]), { timeoutMs: 60_000 });
+  let info = null;
+  for (const line of String(r.output || "").split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    try { info = JSON.parse(t); break; } catch { /* keep looking */ }
+  }
+  const link = info?.browserUrl || info?.url;
+  const hashAt = typeof link === "string" ? link.indexOf("#") : -1;
+  if (hashAt === -1) {
+    console.error(`[setup/open] could not create a sign-in link (exit=${r.code})`);
+    return res.status(500).type("text/plain").send("Could not create a sign-in link. Check the Debug console on /setup.");
+  }
+
+  const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https").split(",")[0].trim();
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
+  const params = new URLSearchParams(link.slice(hashAt + 1));
+  // The CLI only knows the gateway's internal loopback address; point the browser at
+  // this public host instead (the wrapper proxies the WebSocket through).
+  params.set("gatewayUrl", `${proto === "https" ? "wss" : "ws"}://${host}`);
+  return res.redirect(302, `/#${params.toString()}`);
+});
+
 app.get("/setup/export", requireSetupAuth, async (_req, res) => {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
@@ -1486,62 +1523,16 @@ proxy.on("error", (err, _req, res) => {
   }
 });
 
-// --- Dashboard password protection ---
-// Require the same SETUP_PASSWORD for the entire Control UI dashboard,
-// not just the /setup routes.  Healthcheck is excluded so Railway probes work.
-function requireDashboardAuth(req, res, next) {
-  if (req.path === "/healthz" || req.path === "/setup/healthz") return next();
-  if (req.path.startsWith("/hooks")) return next(); // allow OpenClaw webhook endpoints to bypass dashboard auth
-  if (!SETUP_PASSWORD) return next(); // no password configured → open
-  const header = req.headers.authorization || "";
-  const [scheme, encoded] = header.split(" ");
-
-  // Newer Control UI builds make background requests carrying their own
-  // "Authorization: Bearer <gateway token>". A browser can't answer a Basic
-  // challenge for those (the header is already set), so rejecting them made the
-  // login popup reappear forever. The gateway token is the gateway's own secret,
-  // so accept it here and let the gateway validate it as usual.
-  if (scheme === "Bearer" && encoded && OPENCLAW_GATEWAY_TOKEN) {
-    const a = Buffer.from(encoded);
-    const b = Buffer.from(OPENCLAW_GATEWAY_TOKEN);
-    if (a.length === b.length && crypto.timingSafeEqual(a, b)) return next();
-  }
-
-  if (scheme !== "Basic" || !encoded) {
-    res.set("WWW-Authenticate", 'Basic realm="OpenClaw Dashboard"');
-    return res.status(401).send("Auth required");
-  }
-  const decoded = Buffer.from(encoded, "base64").toString("utf8");
-  const idx = decoded.indexOf(":");
-  const password = idx >= 0 ? decoded.slice(idx + 1) : "";
-  if (password !== SETUP_PASSWORD) {
-    res.set("WWW-Authenticate", 'Basic realm="OpenClaw Dashboard"');
-    return res.status(401).send("Invalid password");
-  }
-  return next();
-}
-
-// --- Gateway token injection ---
-// The gateway is only reachable from this container. The Control UI in the browser
-// cannot set custom Authorization headers for WebSocket connections, so we inject
-// the token into proxied requests at the wrapper level.
-function attachGatewayAuthHeader(req) {
-  if (!OPENCLAW_GATEWAY_TOKEN) return;
-  const existing = req?.headers?.authorization;
-  // A Basic header here is the browser's dashboard password (already checked by the
-  // wrapper). The gateway doesn't understand it and answers 401, which the browser
-  // then surfaces as a login popup for every gateway-served file/API. Swap in the
-  // gateway token instead. A Bearer header (the Control UI's own token) is left alone.
-  if (!existing || /^Basic\s/i.test(existing)) {
-    req.headers.authorization = `Bearer ${OPENCLAW_GATEWAY_TOKEN}`;
-  }
-}
-
-proxy.on("proxyReqWs", (_proxyReq, req) => {
-  attachGatewayAuthHeader(req);
-});
-
-app.use(requireDashboardAuth, async (req, res) => {
+// --- Control UI: plain pass-through ---
+// SETUP_PASSWORD guards /setup only. Everything else goes straight to the gateway,
+// which serves the Control UI shell publicly and protects its data and WebSocket with
+// its own token + device pairing (how OpenClaw is designed to be exposed). Putting
+// HTTP Basic auth in front of it broke the Control UI: browsers don't attach Basic
+// credentials to its preloads, service worker, or token-authenticated API calls, so
+// the login popup came back endlessly. The wrapper must NOT inject the gateway token
+// here either, or anyone reaching the public URL would be authenticated.
+// To sign in, use "Open OpenClaw" on /setup (a one-time owner link, see /setup/open).
+app.use(async (req, res) => {
   // If not configured, force users to /setup for any non-setup routes.
   if (!isConfigured() && !req.path.startsWith("/setup")) {
     return res.redirect("/setup");
@@ -1563,7 +1554,6 @@ app.use(requireDashboardAuth, async (req, res) => {
     }
   }
 
-  attachGatewayAuthHeader(req);
   return proxy.web(req, res, { target: GATEWAY_TARGET });
 });
 
@@ -1686,10 +1676,8 @@ function retryGatewayStartInBackground() {
 }
 
 server.on("upgrade", async (req, socket, head) => {
-  // Note: browsers cannot attach arbitrary HTTP headers (including Authorization: Basic)
-  // in WebSocket handshakes. Do not enforce dashboard Basic auth at the upgrade layer.
-  // The gateway authenticates at the protocol layer and we inject the gateway token below.
-
+  // The gateway authenticates the Control UI at the WebSocket protocol layer
+  // (token in the connect params + device pairing); just pass the socket through.
   if (!isConfigured()) {
     socket.destroy();
     return;
@@ -1700,7 +1688,6 @@ server.on("upgrade", async (req, socket, head) => {
     socket.destroy();
     return;
   }
-  attachGatewayAuthHeader(req);
   proxy.ws(req, socket, head, { target: GATEWAY_TARGET });
 });
 

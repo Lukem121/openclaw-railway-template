@@ -363,8 +363,8 @@
           var row = document.createElement('div');
           row.style.marginTop = '0.25rem';
           var btn = document.createElement('button');
-          btn.textContent = 'Approve ' + id;
-          btn.style.background = '#111';
+          btn.textContent = 'Approve';
+          btn.className = 'btn-primary';
           btn.style.marginRight = '0.5rem';
           btn.onclick = function () { approveDevice(id); };
           var code = document.createElement('code');
